@@ -3,10 +3,12 @@
 
 // Import cheerio-without-node-native for React Native
 const cheerio = require('cheerio-without-node-native');
+const { getNuvioCompatibleLink } = require('../nuvio-resolver');
+const { extractRealVideoUrl } = require('../real-url-extractor');
 console.log('[YesMoviesHub] Using cheerio-without-node-native for DOM parsing');
 
 // Constants
-const TMDB_API_KEY = "439c478a771f35c05022f9feabcca01c";
+const TMDB_API_KEY = "0e8d45a15df286dbabf68b2c8a60cc41";
 const BASE_DOMAIN = 'https://yesmovieshub.online';
 const DOMAIN_CACHE_TTL = 4 * 60 * 60 * 1000; // 4 hours
 
@@ -282,7 +284,7 @@ async function getMovieDetails(url) {
     $('.server').each((i, el) => {
       const $server = $(el);
       const onclickAttr = $server.attr('onclick') || '';
-      const serverName = $server.find('div').last().text().trim();
+      let serverName = $server.find('div').last().text().trim();
       
       // Extract server key from onclick attribute
       const serverKeyMatch = onclickAttr.match(/loadServer\(([^)]+)\)/);
@@ -290,8 +292,8 @@ async function getMovieDetails(url) {
       
       console.log(`Processing server ${i + 1}: name="${serverName}", key="${serverKey}"`);
       
-      let embedUrl = null;
-      let host = null;
+  let embedUrl = null;
+  let host = null;
       
       if (serverKey) {
         if (serverKey === 'embedru' && serverData.embedru) {
@@ -311,6 +313,10 @@ async function getMovieDetails(url) {
         if (embedUrl.startsWith('//')) {
           embedUrl = 'https:' + embedUrl;
         }
+        // Normalize and enrich server name
+        if (!serverName) {
+          serverName = host ? host.toUpperCase() : `Server ${i + 1}`;
+        }
         
         const serverInfo = {
           name: serverName || `Server ${i + 1}`,
@@ -319,7 +325,8 @@ async function getMovieDetails(url) {
           embedId: serverData.imdb_id || null,
           quality: 'HD',
           type: 'stream',
-          source: 'YesMoviesHub'
+          source: 'YesMoviesHub',
+          server: serverName
         };
 
         details.servers.push(serverInfo);
@@ -362,60 +369,157 @@ async function getMovieDetails(url) {
   }
 }
 
-// Resolve actual streaming URL from player endpoint
-async function resolvePlayerUrl(playerUrl) {
+// Helper function to extract direct video URLs from embed pages
+async function extractDirectVideoUrls(embedUrl) {
+  try {
+    console.log(`[YesMoviesHub] Extracting direct URLs from: ${embedUrl}`);
+    
+    const response = await makeRequest(embedUrl, {
+      headers: {
+        'Referer': 'https://yesmovieshub.online/',
+        'Origin': 'https://yesmovieshub.online'
+      }
+    });
+    
+    const html = await response.text();
+    const directUrls = [];
+    
+    // Multiple patterns to find video sources
+    const patterns = [
+      // HLS/M3U8 patterns
+      /["']([^"']*\.m3u8[^"']*)["']/gi,
+      /hlsManifestUrl['"]\s*:\s*['"]([^'"]+)['"]|"source":\s*"([^"]*\.m3u8[^"]*)"/gi,
+      /file["']?\s*:\s*["']([^"']*\.m3u8[^"']*)["']/gi,
+      
+      // MP4 patterns
+      /["']([^"']*\.mp4[^"']*)["']/gi,
+      /file["']?\s*:\s*["']([^"']*\.mp4[^"']*)["']/gi,
+      
+      // General video source patterns
+      /sources?\s*:\s*\[\s*{[^}]*["']file["']\s*:\s*["']([^"']+)["']/gi,
+      /src["']?\s*:\s*["']([^"']*\.(mp4|m3u8)[^"']*)["']/gi
+    ];
+    
+    for (const pattern of patterns) {
+      let match;
+      while ((match = pattern.exec(html)) !== null) {
+        const url = match[1] || match[2];
+        if (url && (url.includes('.m3u8') || url.includes('.mp4')) && !url.includes('about:blank')) {
+          const fullUrl = url.startsWith('http') ? url : url.startsWith('//') ? `https:${url}` : `https://${url}`;
+          directUrls.push({
+            url: fullUrl,
+            quality: url.includes('1080') ? '1080p' : url.includes('720') ? '720p' : 'HD',
+            type: url.includes('.m3u8') ? 'hls' : 'mp4'
+          });
+        }
+      }
+    }
+    
+    // Remove duplicates
+    const uniqueUrls = directUrls.filter((item, index, self) => 
+      index === self.findIndex(t => t.url === item.url)
+    );
+    
+    return uniqueUrls;
+  } catch (error) {
+    console.error(`[YesMoviesHub] Error extracting direct URLs: ${error.message}`);
+    return [];
+  }
+}
+
+// Resolve VidSrc embeds to direct streaming links
+async function resolveVidSrcEmbed(embedUrl) {
+  try {
+    const directUrls = await extractDirectVideoUrls(embedUrl);
+    if (directUrls.length > 0) {
+      return directUrls[0]; // Return best quality
+    }
+    
+    // Try to find nested iframes
+    const response = await makeRequest(embedUrl);
+    const html = await response.text();
+    const iframeMatch = html.match(/<iframe[^>]*src=['"](https?:\/\/[^'"]+)['"]/i);
+    
+    if (iframeMatch) {
+      const nestedUrls = await extractDirectVideoUrls(iframeMatch[1]);
+      if (nestedUrls.length > 0) {
+        return nestedUrls[0];
+      }
+    }
+    
+    return null;
+  } catch (error) {
+    console.error(`[YesMoviesHub] Error resolving VidSrc: ${error.message}`);
+    return null;
+  }
+}
+
+// Special handling for different embed types
+async function resolveEmbedByType(embedUrl) {
+  try {
+    // VidSrc handling
+    if (embedUrl.includes('vidsrc')) {
+      return await resolveVidSrcEmbed(embedUrl);
+    }
+    
+    // EmbedRu handling
+    if (embedUrl.includes('embedru')) {
+      const directUrls = await extractDirectVideoUrls(embedUrl);
+      return directUrls.length > 0 ? directUrls[0] : null;
+    }
+    
+    // SuperEmbed/Premium handling
+    if (embedUrl.includes('superembed') || embedUrl.includes('premium')) {
+      const directUrls = await extractDirectVideoUrls(embedUrl);
+      return directUrls.length > 0 ? directUrls[0] : null;
+    }
+    
+    // Generic embed handling
+    const directUrls = await extractDirectVideoUrls(embedUrl);
+    return directUrls.length > 0 ? directUrls[0] : null;
+    
+  } catch (error) {
+    console.error(`[YesMoviesHub] Error resolving embed: ${error.message}`);
+    return null;
+  }
+}
+
+// Resolve actual streaming URL from player endpoint - Nuvio compatible
+async function resolvePlayerUrl(playerUrl, serverName = 'Unknown') {
   try {
     console.log(`[YesMoviesHub] Resolving player URL: ${playerUrl}`);
     
-    const response = await makeRequest(playerUrl);
-    const html = await response.text();
-    const $ = cheerio.load(html);
-
-    // Look for iframe sources or direct video URLs
-    const iframeSrc = $('iframe').attr('src');
-    if (iframeSrc && !iframeSrc.includes('about:blank')) {
-      console.log(`[YesMoviesHub] Found iframe source: ${iframeSrc}`);
+    // First try to extract real video URL from the embed
+    const realVideoUrl = await extractRealVideoUrl(playerUrl, serverName);
+    
+    if (realVideoUrl) {
+      console.log(`[YesMoviesHub] ✅ Extracted real video URL: ${realVideoUrl.url}`);
       return {
-        url: iframeSrc,
-        type: 'iframe',
-        quality: 'HD'
+        url: realVideoUrl.url,
+        type: realVideoUrl.type,
+        quality: realVideoUrl.quality,
+        server: `${serverName} (Direct)`,
+        compatible: true,
+        source: realVideoUrl.source,
+        originalEmbed: playerUrl
       };
     }
-
-    // Look for video sources in the HTML
-    const videoSrc = $('video source').attr('src') || $('video').attr('src');
-    if (videoSrc) {
-      console.log(`[YesMoviesHub] Found video source: ${videoSrc}`);
-      return {
-        url: videoSrc,
-        type: 'direct',
-        quality: 'HD'
-      };
-    }
-
-    // Look for streaming URLs in JavaScript variables
-    const jsMatch = html.match(/(?:src|url)["']?\s*[:=]\s*["']([^"']+\.(?:mp4|m3u8|mkv)[^"']*)["']/i);
-    if (jsMatch) {
-      console.log(`[YesMoviesHub] Found streaming URL in JS: ${jsMatch[1]}`);
-      return {
-        url: jsMatch[1],
-        type: jsMatch[1].includes('.m3u8') ? 'hls' : 'direct',
-        quality: 'HD'
-      };
-    }
-
-    console.log(`[YesMoviesHub] No direct streaming URL found for player`);
-    return {
-      url: playerUrl,
-      type: 'embed',
-      quality: 'HD'
-    };
+    
+    // Fallback to Nuvio-compatible resolver if direct extraction fails
+    console.log(`[YesMoviesHub] Direct extraction failed, trying Nuvio resolver...`);
+    const result = await getNuvioCompatibleLink(playerUrl, serverName);
+    console.log(`[YesMoviesHub] Resolver result:`, result.compatible ? 'Compatible' : 'Needs iframe support');
+    
+    return result;
   } catch (error) {
     console.error(`[YesMoviesHub] Failed to resolve player URL: ${error.message}`);
     return {
       url: playerUrl,
-      type: 'embed',
-      quality: 'HD'
+      type: 'error',
+      quality: 'Unknown',
+      server: serverName,
+      compatible: false,
+      error: error.message
     };
   }
 }
@@ -431,20 +535,26 @@ async function getStreamingLinks(url) {
 
     const resolvedLinks = [];
     
-    // Resolve each player URL to get actual streaming links
+    // Resolve each player URL to get actual streaming links - Nuvio format
     for (const link of details.links) {
       try {
-        const resolved = await resolvePlayerUrl(link.url);
+        const resolved = await resolvePlayerUrl(link.url, link.server || 'Unknown');
         resolvedLinks.push({
-          ...link,
-          streamUrl: resolved.url,
-          streamType: resolved.type,
-          quality: resolved.quality || link.quality
+          ...resolved,  // Use the full resolved object
+          server: resolved.server || link.server,
+          originalUrl: link.url
         });
       } catch (error) {
         console.error(`[YesMoviesHub] Failed to resolve link: ${error.message}`);
-        // Include the original link even if resolution fails
-        resolvedLinks.push(link);
+        // Include the original link in Nuvio format
+        resolvedLinks.push({
+          url: link.url,
+          type: 'error',
+          quality: link.quality || 'HD',
+          server: link.server || 'Unknown',
+          compatible: false,
+          error: error.message
+        });
       }
     }
 
@@ -598,6 +708,18 @@ module.exports = {
   getTVEpisodeLinks,
   resolvePlayerUrl,
   getDomain: getYesMoviesHubDomain,
+  // Convenience: resolve all links on a details page into Nuvio-compatible objects
+  async resolveAllLinks(pageUrl) {
+    const details = await getMovieDetails(pageUrl);
+    if (!details || !details.links || !details.links.length) return [];
+    const out = [];
+    for (const link of details.links) {
+      const name = link.server || link.name || link.host || 'Unknown';
+      const resolved = await resolvePlayerUrl(link.url, name);
+      out.push({ ...resolved, originalUrl: link.url });
+    }
+    return out.sort((a, b) => parseQualityForSort(b.quality) - parseQualityForSort(a.quality));
+  },
   
   // Provider metadata
   metadata: {
