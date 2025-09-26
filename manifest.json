@@ -241,6 +241,24 @@
         "tam",
         "hin"
       ]
+    },
+    {
+      "id": "yesmovieshub",
+      "name": "YesMoviesHub",
+      "description": "YesMoviesHub free streaming with HD quality and multiple format support",
+      "version": "1.0.0",
+      "author": "Nuvio Team",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/yesmovieshub.js",
+      "enabled": true,
+      "formats": ["mp4", "mkv"],
+      "logo": "https://yesmovieshub.online/wp-content/uploads/2024/01/cropped-favicon-32x32.png",
+      "contentLanguage": [
+        "en"
+      ]
     }
   ]
 }
