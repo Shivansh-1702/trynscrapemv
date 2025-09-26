@@ -201,7 +201,9 @@ async function getMovieDetails(url) {
       country: '',
       imdbRating: null,
       poster: null,
-      links: []
+      links: [],
+      embedId: null,
+      servers: []
     };
 
     // Extract title
@@ -239,28 +241,182 @@ async function getMovieDetails(url) {
     const posterElement = $('.poster img, .movie-poster img').first();
     details.poster = posterElement.length ? posterElement.attr('data-src') || posterElement.attr('src') : null;
 
-    // Look for streaming links - this would need to be customized based on the actual site structure
-    // YesMoviesHub likely embeds players or has download links in the content
-    $('.entry-content a, .download-links a, .player-container').each((i, el) => {
-      const $link = $(el);
-      const linkUrl = $link.attr('href');
-      const linkText = $link.text().trim();
+    // Extract server data from JavaScript variables
+    const domain = await getYesMoviesHubDomain();
+    
+    // Extract server data from JavaScript
+    const scriptContent = html.match(/var\s+Servers\s*=\s*(\{[^}]+\})/);
+    let serverData = {};
+    if (scriptContent) {
+      try {
+        // Parse the JavaScript object string  
+        const serverScript = scriptContent[1];
+        console.log('Raw server script:', serverScript);
+        
+        // Extract individual server URLs using regex - handle escaped forward slashes
+        const embedruMatch = serverScript.match(/"embedru"\s*:\s*"([^"]+)"/);
+        const vidsrcMatch = serverScript.match(/"vidsrc"\s*:\s*"([^"]+)"/);
+        const premiumMatch = serverScript.match(/"premium"\s*:\s*"([^"]+)"/);
+        const imdbIdMatch = serverScript.match(/"imdb_id"\s*:\s*"([^"]+)"/);
+        
+        if (embedruMatch) {
+          serverData.embedru = embedruMatch[1].replace(/\\\//g, '/'); // Unescape forward slashes
+        }
+        if (vidsrcMatch) {
+          serverData.vidsrc = vidsrcMatch[1].replace(/\\\//g, '/');
+        }
+        if (premiumMatch) {
+          serverData.premium = premiumMatch[1].replace(/\\\//g, '/');
+        }
+        if (imdbIdMatch) {
+          serverData.imdb_id = imdbIdMatch[1];
+        }
+        
+        console.log('Parsed server data:', serverData);
+      } catch (e) {
+        console.log('Failed to parse server data:', e.message);
+      }
+    }
+
+    // Process server elements and map to server data
+    $('.server').each((i, el) => {
+      const $server = $(el);
+      const onclickAttr = $server.attr('onclick') || '';
+      const serverName = $server.find('div').last().text().trim();
       
-      if (linkUrl && (linkUrl.includes('.mp4') || linkUrl.includes('stream') || linkUrl.includes('watch'))) {
-        details.links.push({
-          url: linkUrl,
-          quality: extractQuality(linkText),
-          type: linkText.toLowerCase().includes('download') ? 'download' : 'stream',
+      // Extract server key from onclick attribute
+      const serverKeyMatch = onclickAttr.match(/loadServer\(([^)]+)\)/);
+      const serverKey = serverKeyMatch ? serverKeyMatch[1] : null;
+      
+      console.log(`Processing server ${i + 1}: name="${serverName}", key="${serverKey}"`);
+      
+      let embedUrl = null;
+      let host = null;
+      
+      if (serverKey) {
+        if (serverKey === 'embedru' && serverData.embedru) {
+          embedUrl = serverData.embedru;
+          host = 'embedru';
+        } else if (serverKey === 'superembed' && serverData.premium) {
+          embedUrl = serverData.premium;
+          host = 'superembed';
+        } else if (serverKey === 'vidsrc' && serverData.vidsrc) {
+          embedUrl = serverData.vidsrc;
+          host = 'vidsrc';
+        }
+      }
+      
+      if (embedUrl) {
+        // Ensure URL has protocol
+        if (embedUrl.startsWith('//')) {
+          embedUrl = 'https:' + embedUrl;
+        }
+        
+        const serverInfo = {
+          name: serverName || `Server ${i + 1}`,
+          host: host,
+          url: embedUrl,
+          embedId: serverData.imdb_id || null,
+          quality: 'HD',
+          type: 'stream',
           source: 'YesMoviesHub'
-        });
+        };
+
+        details.servers.push(serverInfo);
+        details.links.push(serverInfo);
+        console.log(`Added server: ${serverInfo.name} - ${serverInfo.url}`);
       }
     });
 
-    console.log(`[YesMoviesHub] Extracted ${details.links.length} links for: ${details.title}`);
+    // If no servers found, try to extract from JavaScript variables
+    if (details.links.length === 0) {
+      const scriptMatch = html.match(/Episodes=\{[^}]*"tvid":"(\d+)"[^}]*\}/);
+      if (scriptMatch) {
+        const tvId = scriptMatch[1];
+        details.embedId = tvId;
+        
+        // Add default servers based on common patterns
+        const defaultServers = ['embedru', 'superembed', 'vidsrc'];
+        defaultServers.forEach((host, i) => {
+          const playerUrl = `${domain}/?player_tv=${tvId}&host=${host}&season=1&episode=1`;
+          details.links.push({
+            name: `Server ${i + 1}`,
+            host: host,
+            url: playerUrl,
+            embedId: tvId,
+            season: 1,
+            episode: 1,
+            quality: 'HD',
+            type: 'stream',
+            source: 'YesMoviesHub'
+          });
+        });
+      }
+    }
+
+    console.log(`[YesMoviesHub] Extracted ${details.links.length} streaming links for: ${details.title}`);
     return details;
   } catch (error) {
     console.error(`[YesMoviesHub] Failed to get movie details: ${error.message}`);
     return null;
+  }
+}
+
+// Resolve actual streaming URL from player endpoint
+async function resolvePlayerUrl(playerUrl) {
+  try {
+    console.log(`[YesMoviesHub] Resolving player URL: ${playerUrl}`);
+    
+    const response = await makeRequest(playerUrl);
+    const html = await response.text();
+    const $ = cheerio.load(html);
+
+    // Look for iframe sources or direct video URLs
+    const iframeSrc = $('iframe').attr('src');
+    if (iframeSrc && !iframeSrc.includes('about:blank')) {
+      console.log(`[YesMoviesHub] Found iframe source: ${iframeSrc}`);
+      return {
+        url: iframeSrc,
+        type: 'iframe',
+        quality: 'HD'
+      };
+    }
+
+    // Look for video sources in the HTML
+    const videoSrc = $('video source').attr('src') || $('video').attr('src');
+    if (videoSrc) {
+      console.log(`[YesMoviesHub] Found video source: ${videoSrc}`);
+      return {
+        url: videoSrc,
+        type: 'direct',
+        quality: 'HD'
+      };
+    }
+
+    // Look for streaming URLs in JavaScript variables
+    const jsMatch = html.match(/(?:src|url)["']?\s*[:=]\s*["']([^"']+\.(?:mp4|m3u8|mkv)[^"']*)["']/i);
+    if (jsMatch) {
+      console.log(`[YesMoviesHub] Found streaming URL in JS: ${jsMatch[1]}`);
+      return {
+        url: jsMatch[1],
+        type: jsMatch[1].includes('.m3u8') ? 'hls' : 'direct',
+        quality: 'HD'
+      };
+    }
+
+    console.log(`[YesMoviesHub] No direct streaming URL found for player`);
+    return {
+      url: playerUrl,
+      type: 'embed',
+      quality: 'HD'
+    };
+  } catch (error) {
+    console.error(`[YesMoviesHub] Failed to resolve player URL: ${error.message}`);
+    return {
+      url: playerUrl,
+      type: 'embed',
+      quality: 'HD'
+    };
   }
 }
 
@@ -273,8 +429,27 @@ async function getStreamingLinks(url) {
       return [];
     }
 
+    const resolvedLinks = [];
+    
+    // Resolve each player URL to get actual streaming links
+    for (const link of details.links) {
+      try {
+        const resolved = await resolvePlayerUrl(link.url);
+        resolvedLinks.push({
+          ...link,
+          streamUrl: resolved.url,
+          streamType: resolved.type,
+          quality: resolved.quality || link.quality
+        });
+      } catch (error) {
+        console.error(`[YesMoviesHub] Failed to resolve link: ${error.message}`);
+        // Include the original link even if resolution fails
+        resolvedLinks.push(link);
+      }
+    }
+
     // Sort links by quality (highest first)
-    const sortedLinks = details.links.sort((a, b) => {
+    const sortedLinks = resolvedLinks.sort((a, b) => {
       return parseQualityForSort(b.quality) - parseQualityForSort(a.quality);
     });
 
@@ -353,12 +528,75 @@ async function getTrendingMovies() {
   }
 }
 
+// Get streaming links for specific TV show episode
+async function getTVEpisodeLinks(url, season = 1, episode = 1) {
+  try {
+    console.log(`[YesMoviesHub] Getting TV episode links: S${season}E${episode}`);
+    
+    const details = await getMovieDetails(url);
+    if (!details || !details.embedId) {
+      console.log(`[YesMoviesHub] No embed ID found for TV show`);
+      return [];
+    }
+
+    const domain = await getYesMoviesHubDomain();
+    const episodeLinks = [];
+    
+    // Generate player URLs for different servers with specific season/episode
+    const servers = ['embedru', 'superembed', 'vidsrc'];
+    
+    for (let i = 0; i < servers.length; i++) {
+      const host = servers[i];
+      const playerUrl = `${domain}/?player_tv=${details.embedId}&host=${host}&season=${season}&episode=${episode}`;
+      
+      try {
+        const resolved = await resolvePlayerUrl(playerUrl);
+        episodeLinks.push({
+          name: `Server ${i + 1}`,
+          host: host,
+          url: playerUrl,
+          streamUrl: resolved.url,
+          streamType: resolved.type,
+          embedId: details.embedId,
+          season: season,
+          episode: episode,
+          quality: resolved.quality || 'HD',
+          type: 'stream',
+          source: 'YesMoviesHub'
+        });
+      } catch (error) {
+        console.error(`[YesMoviesHub] Failed to resolve episode link for ${host}: ${error.message}`);
+        // Include the original link even if resolution fails
+        episodeLinks.push({
+          name: `Server ${i + 1}`,
+          host: host,
+          url: playerUrl,
+          embedId: details.embedId,
+          season: season,
+          episode: episode,
+          quality: 'HD',
+          type: 'stream',
+          source: 'YesMoviesHub'
+        });
+      }
+    }
+
+    console.log(`[YesMoviesHub] Found ${episodeLinks.length} episode links for S${season}E${episode}`);
+    return episodeLinks;
+  } catch (error) {
+    console.error(`[YesMoviesHub] Failed to get TV episode links: ${error.message}`);
+    return [];
+  }
+}
+
 // Export functions for the scraper
 module.exports = {
   searchMovies,
   getMovieDetails,
   getStreamingLinks,
   getTrendingMovies,
+  getTVEpisodeLinks,
+  resolvePlayerUrl,
   getDomain: getYesMoviesHubDomain,
   
   // Provider metadata
@@ -367,7 +605,7 @@ module.exports = {
     description: 'YesMoviesHub free streaming with HD quality',
     baseUrl: BASE_DOMAIN,
     supportedTypes: ['movie', 'tv'],
-    features: ['search', 'trending', 'details'],
+    features: ['search', 'trending', 'details', 'episodes'],
     contentLanguage: ['en']
   }
 };
