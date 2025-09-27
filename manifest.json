@@ -278,6 +278,24 @@
         "fr",
         "en"
       ]
+    },
+    {
+      "id": "fivemovierulz",
+      "name": "FiveMovieRulz",
+      "description": "Hindi and Bollywood movies with direct download links, ported from @phisher98/cloudstream-extensions-phisher",
+      "version": "1.0.0",
+      "author": "Nuvio Team",
+      "supportedTypes": [
+        "movie"
+      ],
+      "filename": "providers/fivemovierulz.js",
+      "enabled": true,
+      "formats": ["mp4", "mkv"],
+      "logo": "https://5movierulz.mom/wp-content/uploads/2023/01/cropped-favicon-32x32.png",
+      "contentLanguage": [
+        "hi",
+        "en"
+      ]
     }
   ]
 }
