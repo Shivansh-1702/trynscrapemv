@@ -1,0 +1,15 @@
+{
+  "name": "trynscrapemv",
+  "version": "1.0.0",
+  "description": "A collection of local scrapers for the Nuvio streaming application. These scrapers allow you to fetch streams from various sources directly within the app.",
+  "main": "real-extractor.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "cheerio-without-node-native": "^0.20.2"
+  }
+}

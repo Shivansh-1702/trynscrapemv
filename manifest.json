@@ -259,6 +259,25 @@
       "contentLanguage": [
         "en"
       ]
+    },
+    {
+      "id": "coflix",
+      "name": "Coflix",
+      "description": "French streaming service with movies and TV shows, ported from @phisher98/cloudstream-extensions-phisher",
+      "version": "1.0.0",
+      "author": "Nuvio Team",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/coflix.js",
+      "enabled": true,
+      "formats": ["mp4", "m3u8"],
+      "logo": "https://coflix.cc/wp-content/uploads/2024/01/coflix-logo.png",
+      "contentLanguage": [
+        "fr",
+        "en"
+      ]
     }
   ]
 }
